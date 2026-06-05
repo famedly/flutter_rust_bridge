@@ -28,3 +28,26 @@ Future<ExternalLibrary> loadExternalLibraryRaw({
     wasmBindgenName: wasmBindgenName,
   );
 }
+
+/// Load the WASM module inside a Dedicated Web Worker.
+///
+/// This enables OPFS (FileSystemSyncAccessHandle) and Atomics.wait
+/// inside the Worker context, which are blocked on the main thread.
+///
+/// [workerScriptUrl] is the URL to the Worker JS entry point
+/// (e.g. 'frb_worker.js').
+Future<ExternalLibrary> loadExternalLibraryInWorker({
+  required String moduleRoot,
+  required String workerScriptUrl,
+  String wasmBindgenName = 'wasm_bindgen',
+}) async {
+  final worker = await initializeWasmModuleInWorker(
+    root: moduleRoot,
+    workerScriptUrl: workerScriptUrl,
+  );
+  return ExternalLibrary(
+    debugInfo: 'moduleRoot=$moduleRoot (worker)',
+    wasmBindgenName: wasmBindgenName,
+    worker: worker,
+  );
+}

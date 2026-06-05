@@ -31,11 +31,19 @@ class ExternalLibrary extends BaseExternalLibrary {
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   final String wasmBindgenName;
 
+  /// When non-null, the WASM module runs in this Dedicated Worker.
+  /// All FRB dispatch calls are routed through postMessage.
+  final web.Worker? worker;
+
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   const ExternalLibrary({
     required super.debugInfo,
     this.wasmBindgenName = 'wasm_bindgen',
+    this.worker,
   });
+
+  /// Whether this library runs in Worker mode (WASM in Dedicated Worker).
+  bool get isWorkerMode => worker != null;
 }
 
 /// {@macro flutter_rust_bridge.internal}
