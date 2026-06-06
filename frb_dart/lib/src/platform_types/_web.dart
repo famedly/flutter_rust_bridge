@@ -35,11 +35,18 @@ class ExternalLibrary extends BaseExternalLibrary {
   /// All FRB dispatch calls are routed through postMessage.
   final web.Worker? worker;
 
+  /// The Rust content hash reported by the Worker during initialization.
+  ///
+  /// Only set in Worker mode, where the WASM module cannot be queried for its
+  /// content hash from the main thread.
+  final int? workerContentHash;
+
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   const ExternalLibrary({
     required super.debugInfo,
     this.wasmBindgenName = 'wasm_bindgen',
     this.worker,
+    this.workerContentHash,
   });
 
   /// Whether this library runs in Worker mode (WASM in Dedicated Worker).

@@ -24,24 +24,31 @@ Future<void> initializeWasmModule({
   await wasmBindgen('${root}_bg.wasm'.toJS).toDart;
 }
 
+/// Expected Worker protocol version — must match `PROTOCOL_VERSION` in
+/// `frb_worker.js`. Bump this whenever the message protocol changes.
+const _kExpectedProtocolVersion = 1;
+
+/// How long to wait for the Worker to report `ready` before giving up.
+const _kWorkerInitTimeout = Duration(seconds: 30);
+
+/// Result of initializing the WASM module inside a Dedicated Web Worker.
+typedef WorkerInitResult = ({web.Worker worker, int contentHash});
+
 /// Initialize the WASM module inside a Dedicated Web Worker.
 ///
 /// This enables APIs that require Worker context:
-/// - OPFS FileSystemSyncAccessHandle (for SQLite/sahpool)
-/// - Atomics.wait (for Rust mutex/rwlock)
+/// - OPFS `FileSystemSyncAccessHandle` (for SQLite/sahpool)
+/// - `Atomics.wait` (for Rust mutex/rwlock)
 ///
-/// Returns the Worker instance. The caller is responsible for routing
-/// FRB dispatch calls through the Worker via postMessage.
+/// Returns the [web.Worker] together with the Rust content hash reported by
+/// the Worker. The caller is responsible for routing FRB dispatch calls
+/// through the Worker via postMessage.
 ///
-/// Additionally installs a JS Proxy on `window.wasm_bindgen` so that
-/// generated code (e.g. `RustLibWire`) that calls `wasmModule.rust_arc_*`
-/// transparently routes those calls through the Worker instead of trying
-/// to call WASM functions that don't exist on the main thread.
-/// Expected protocol version — must match `PROTOCOL_VERSION` in frb_worker.js.
-const _kExpectedProtocolVersion = 1;
-
-/// Initialize a WASM module inside a dedicated Web Worker.
-Future<web.Worker> initializeWasmModuleInWorker({
+/// Additionally installs a JS Proxy on `window.wasm_bindgen` so that generated
+/// code (e.g. `RustLibWire`) that calls `wasmModule.rust_arc_*` transparently
+/// routes those calls through the Worker instead of trying to call WASM
+/// functions that do not exist on the main thread.
+Future<WorkerInitResult> initializeWasmModuleInWorker({
   required String root,
   required String workerScriptUrl,
 }) async {
@@ -52,72 +59,74 @@ Future<web.Worker> initializeWasmModuleInWorker({
   final readyCompleter = Completer<int>();
 
   final onMessage = (web.MessageEvent event) {
-    final data = event.data as JSObject;
-    final type = (data.getProperty('type'.toJS) as JSString).toDart;
-    if (type == 'ready') {
-      // Protocol version check
-      final version =
-          (data.getProperty('protocolVersion'.toJS) as JSNumber).toDartInt;
-      if (version != _kExpectedProtocolVersion) {
-        web.console.warn(
-          'FRB Worker protocol mismatch: expected v$_kExpectedProtocolVersion, got v$version. Rebuild may be needed.'
-              .toJS,
-        );
-      }
-      final contentHash =
-          (data.getProperty('contentHash'.toJS) as JSNumber).toDartInt;
-      readyCompleter.complete(contentHash);
+    final data = event.data;
+    if (data == null || readyCompleter.isCompleted) return;
+    final obj = data as JSObject;
+    if (_stringProp(obj, 'type') != 'ready') return;
+
+    final version =
+        (obj.getProperty('protocolVersion'.toJS) as JSNumber?)?.toDartInt ?? -1;
+    if (version != _kExpectedProtocolVersion) {
+      readyCompleter.completeError(
+        StateError(
+          'FRB Worker protocol mismatch: expected v$_kExpectedProtocolVersion, '
+          'got v$version. Rebuild the Worker (frb_worker.js).',
+        ),
+      );
+      return;
     }
+    final contentHash =
+        (obj.getProperty('contentHash'.toJS) as JSNumber).toDartInt;
+    readyCompleter.complete(contentHash);
   }.toJS;
 
   worker.addEventListener('message', onMessage);
 
-  // Install a persistent error listener that logs Worker-side errors
-  // to the browser console (errors would otherwise be silently lost).
+  // Install a persistent error listener that logs Worker-side errors to the
+  // browser console (errors would otherwise be silently lost).
   _installWorkerErrorListener(worker);
 
-  // Build absolute URLs for the Worker (relative to current page)
-  final jsUrl = '$root.js';
-  final wasmUrl = '${root}_bg.wasm';
-
-  // Send init command to Worker
+  // URLs are resolved by the Worker relative to the current page.
   final initMsg = <String, dynamic>{
     'type': 'init',
-    'jsUrl': jsUrl,
-    'wasmUrl': wasmUrl,
+    'jsUrl': '$root.js',
+    'wasmUrl': '${root}_bg.wasm',
   }.jsify();
   worker.postMessage(initMsg);
 
-  web.console.log('FRB Worker: init message sent, waiting for ready...'.toJS);
+  final int contentHash;
+  try {
+    contentHash = await readyCompleter.future.timeout(
+      _kWorkerInitTimeout,
+      onTimeout: () => throw StateError(
+        'FRB Worker failed to initialize within '
+        '${_kWorkerInitTimeout.inSeconds} seconds',
+      ),
+    );
+  } catch (_) {
+    // Clean up the half-initialized Worker so it does not leak.
+    worker.terminate();
+    rethrow;
+  } finally {
+    worker.removeEventListener('message', onMessage);
+  }
 
-  // Wait for Worker to signal ready (with timeout)
-  final contentHash = await readyCompleter.future.timeout(
-    const Duration(seconds: 30),
-    onTimeout: () => throw StateError(
-      'FRB Worker failed to initialize within 30 seconds',
-    ),
-  );
-
-  web.console.log('FRB Worker: ready received, contentHash=$contentHash'.toJS);
-
-  worker.removeEventListener('message', onMessage);
-
-  // Store the content hash on the window for later access
-  web.window.setProperty(
-    '_frb_worker_content_hash'.toJS,
-    contentHash.toJS,
-  );
-
-  // Install a JS Proxy on window.wasm_bindgen that intercepts
-  // rust_arc_* calls and routes them through the Worker.
-  // This makes generated RustLibWire code work unchanged —
-  // `wasmModule.rust_arc_increment/decrement_strong_count_*(ptr)`
-  // becomes a fire-and-forget postMessage to the Worker.
-  // postMessage ordering guarantees the arc op executes before any
-  // subsequent FFI call dispatched to the same Worker.
+  // Install a JS Proxy on window.wasm_bindgen that intercepts rust_arc_* calls
+  // and routes them through the Worker. This makes generated RustLibWire code
+  // work unchanged — `wasmModule.rust_arc_increment/decrement_strong_count_*`
+  // becomes a fire-and-forget postMessage to the Worker. postMessage ordering
+  // guarantees the arc op executes before any subsequent FFI call dispatched
+  // to the same Worker.
   _installWasmBindgenProxy(worker, contentHash);
 
-  return worker;
+  return (worker: worker, contentHash: contentHash);
+}
+
+/// Reads a string property from [obj], or `null` if absent / not a string.
+String? _stringProp(JSObject obj, String name) {
+  final value = obj.getProperty(name.toJS);
+  if (value == null || !value.typeofEquals('string')) return null;
+  return (value as JSString).toDart;
 }
 
 /// Creates a JS Proxy on `window.wasm_bindgen` that intercepts property
@@ -184,18 +193,10 @@ void _installWorkerErrorListener(web.Worker worker) {
       final data = event.data;
       if (data == null) return;
       final jsObj = data as JSObject;
-      final typeProp = jsObj.getProperty('type'.toJS);
-      if (typeProp == null) return;
-      final type = (typeProp as JSString).toDart;
-      if (type == 'error') {
-        final source = jsObj.hasProperty('source'.toJS).toDart
-            ? (jsObj.getProperty('source'.toJS) as JSString).toDart
-            : 'unknown';
-        final message = jsObj.hasProperty('message'.toJS).toDart
-            ? (jsObj.getProperty('message'.toJS) as JSString).toDart
-            : 'no message';
-        web.console.error('FRB Worker error [$source]: $message'.toJS);
-      }
+      if (_stringProp(jsObj, 'type') != 'error') return;
+      final source = _stringProp(jsObj, 'source') ?? 'unknown';
+      final message = _stringProp(jsObj, 'message') ?? 'no message';
+      web.console.error('FRB Worker error [$source]: $message'.toJS);
     }).toJS,
   );
 }

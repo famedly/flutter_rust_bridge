@@ -1,10 +1,10 @@
-// ignore_for_file: non_constant_identifier_names, undefined_getter, unused_field, prefer_final_fields
+// ignore_for_file: non_constant_identifier_names
 
-import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
+import 'dart:typed_data';
 
-import 'package:flutter_rust_bridge/src/generalized_uint8list/generalized_uint8list.dart';
+import 'package:flutter_rust_bridge/src/generalized_uint8list/_web.dart';
 import 'package:flutter_rust_bridge/src/platform_types/_web.dart';
 import 'package:web/web.dart' as web;
 
@@ -12,35 +12,15 @@ import 'package:web/web.dart' as web;
 class GeneralizedFrbRustBinding {
   final String _wasmBindgenName;
   final web.Worker? _worker;
-  int _syncIdCounter = 0;
-  final Map<int, Completer<JSArrayBuffer>> _pendingSyncCalls = {};
+  final int? _workerContentHash;
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   GeneralizedFrbRustBinding(ExternalLibrary externalLibrary)
       : _wasmBindgenName = externalLibrary.wasmBindgenName,
-        _worker = externalLibrary.worker {
-    if (_worker != null) {
-      _setupWorkerSyncHandler();
-    }
-  }
+        _worker = externalLibrary.worker,
+        _workerContentHash = externalLibrary.workerContentHash;
 
   bool get _isWorkerMode => _worker != null;
-
-  void _setupWorkerSyncHandler() {
-    _worker!.addEventListener(
-      'message',
-      ((web.MessageEvent event) {
-        final data = event.data as JSObject;
-        final type = (data.getProperty('type'.toJS) as JSString).toDart;
-        if (type == 'syncResult') {
-          final id = (data.getProperty('id'.toJS) as JSNumber).toDartInt;
-          final buffer =
-              data.getProperty('buffer'.toJS) as JSArrayBuffer;
-          _pendingSyncCalls.remove(id)?.complete(buffer);
-        }
-      }).toJS,
-    );
-  }
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   void storeDartPostCObject() {}
@@ -80,9 +60,11 @@ class GeneralizedFrbRustBinding {
     required int rustVecLen,
     required int dataLen,
   }) {
-    // Copy the Uint8Array data into a transferable ArrayBuffer
-    final dartBytes = ptr.toDart;
-    final buffer = dartBytes.buffer.toJS;
+    // Copy exactly the relevant bytes into a fresh, transferable ArrayBuffer.
+    // We must not transfer `ptr`'s underlying buffer directly: it may be a
+    // view with a non-zero offset into a larger (possibly reused) buffer, and
+    // transferring would detach that buffer on the main thread.
+    final buffer = _toTransferableBuffer(ptr);
 
     final msg = JSObject();
     msg.setProperty('type'.toJS, 'call'.toJS);
@@ -137,8 +119,7 @@ class GeneralizedFrbRustBinding {
     required int dataLen,
   }) {
     if (_isWorkerMode) {
-      final dartBytes = ptr.toDart;
-      final buffer = dartBytes.buffer.toJS;
+      final buffer = _toTransferableBuffer(ptr);
 
       final msg = JSObject();
       msg.setProperty('type'.toJS, 'deliverOutput'.toJS);
@@ -160,15 +141,10 @@ class GeneralizedFrbRustBinding {
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   int getRustContentHash() {
-    web.console.log('getRustContentHash: _isWorkerMode=$_isWorkerMode, _worker=$_worker'.toJS);
     if (_isWorkerMode) {
-      // Content hash was stored during Worker init
-      final rawProp = web.window.getProperty('_frb_worker_content_hash'.toJS);
-      web.console.log('getRustContentHash: rawProp=$rawProp, type=${rawProp.runtimeType}'.toJS);
-      final hash = rawProp as JSNumber;
-      final result = hash.toDartInt;
-      web.console.log('getRustContentHash: returning $result'.toJS);
-      return result;
+      // The hash is reported by the Worker during initialization, since the
+      // WASM module cannot be queried from the main thread in Worker mode.
+      return _workerContentHash!;
     }
     return _wasmBindgen.frb_get_rust_content_hash();
   }
@@ -184,8 +160,7 @@ class GeneralizedFrbRustBinding {
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   Object dartOpaqueRust2DartDecode(int ptr) => _isWorkerMode
-      ? throw UnsupportedError(
-          'Dart opaques are not supported in Worker mode')
+      ? throw UnsupportedError('Dart opaques are not supported in Worker mode')
       : _wasmBindgen.frb_dart_opaque_rust2dart_decode(ptr).dartify()!;
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
@@ -205,6 +180,14 @@ class GeneralizedFrbRustBinding {
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   void freeWireSyncRust2DartSse(WireSyncRust2DartSse raw) {}
+
+  /// Copies the bytes referenced by [ptr] into a fresh [JSArrayBuffer] that is
+  /// safe to put on a postMessage transfer list.
+  JSArrayBuffer _toTransferableBuffer(PlatformGeneralizedUint8ListPtr ptr) {
+    final view = ptr.toDart;
+    final copy = Uint8List.fromList(view);
+    return copy.buffer.toJS;
+  }
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   _JSWasmBindgen get _wasmBindgen {

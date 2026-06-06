@@ -41,13 +41,14 @@ Future<ExternalLibrary> loadExternalLibraryInWorker({
   required String workerScriptUrl,
   String wasmBindgenName = 'wasm_bindgen',
 }) async {
-  final worker = await initializeWasmModuleInWorker(
+  final result = await initializeWasmModuleInWorker(
     root: moduleRoot,
     workerScriptUrl: workerScriptUrl,
   );
   return ExternalLibrary(
     debugInfo: 'moduleRoot=$moduleRoot (worker)',
     wasmBindgenName: wasmBindgenName,
-    worker: worker,
+    worker: result.worker,
+    workerContentHash: result.contentHash,
   );
 }
