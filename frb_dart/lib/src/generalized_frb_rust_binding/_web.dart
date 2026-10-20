@@ -16,9 +16,9 @@ class GeneralizedFrbRustBinding {
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   GeneralizedFrbRustBinding(ExternalLibrary externalLibrary)
-      : _wasmBindgenName = externalLibrary.wasmBindgenName,
-        _worker = externalLibrary.worker,
-        _workerContentHash = externalLibrary.workerContentHash;
+    : _wasmBindgenName = externalLibrary.wasmBindgenName,
+      _worker = externalLibrary.worker,
+      _workerContentHash = externalLibrary.workerContentHash;
 
   bool get _isWorkerMode => _worker != null;
 
@@ -49,7 +49,12 @@ class GeneralizedFrbRustBinding {
       );
     } else {
       _wasmBindgen.frb_pde_ffi_dispatcher_primary(
-          funcId, port, ptr, rustVecLen, dataLen);
+        funcId,
+        port,
+        ptr,
+        rustVecLen,
+        dataLen,
+      );
     }
   }
 
@@ -151,17 +156,19 @@ class GeneralizedFrbRustBinding {
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   PlatformPointer dartOpaqueDart2RustEncode(
-          Object object, NativePortType dartHandlerPort) =>
-      _isWorkerMode
-          ? throw UnsupportedError(
-              'Dart opaques are not supported in Worker mode')
-          : _wasmBindgen.frb_dart_opaque_dart2rust_encode(
-              object.jsify()!, dartHandlerPort);
+    Object object,
+    NativePortType dartHandlerPort,
+  ) => _isWorkerMode
+      ? throw UnsupportedError('Dart opaques are not supported in Worker mode')
+      : _wasmBindgen.frb_dart_opaque_dart2rust_encode(
+          object.toExternalReference,
+          dartHandlerPort,
+        );
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   Object dartOpaqueRust2DartDecode(int ptr) => _isWorkerMode
       ? throw UnsupportedError('Dart opaques are not supported in Worker mode')
-      : _wasmBindgen.frb_dart_opaque_rust2dart_decode(ptr).dartify()!;
+      : _wasmBindgen.frb_dart_opaque_rust2dart_decode(ptr).toDartObject!;
 
   /// {@macro flutter_rust_bridge.only_for_generated_code}
   void dartOpaqueDropThreadBoxPersistentHandle(int ptr) {

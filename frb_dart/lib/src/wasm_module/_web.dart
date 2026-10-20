@@ -175,8 +175,10 @@ void _installWasmBindgenProxy(web.Worker worker, int contentHash) {
   // Construct the Proxy via `new Proxy({}, handler)`.
   final proxyConstructor =
       globalContext.getProperty('Proxy'.toJS) as JSFunction;
-  final proxy =
-      proxyConstructor.callAsConstructor<JSObject>(JSObject(), handler);
+  final proxy = proxyConstructor.callAsConstructor<JSObject>(
+    JSObject(),
+    handler,
+  );
 
   // Install as `window.wasm_bindgen` so generated RustLibWire code
   // (`@JS('wasm_bindgen') external ...`) finds it.
