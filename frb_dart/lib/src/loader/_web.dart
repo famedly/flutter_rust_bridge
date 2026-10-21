@@ -36,14 +36,21 @@ Future<ExternalLibrary> loadExternalLibraryRaw({
 ///
 /// [workerScriptUrl] is the URL to the Worker JS entry point
 /// (e.g. 'frb_worker.js').
+///
+/// [onWaitingForOtherTab] is called if the Worker reports that it has to wait
+/// for another tab before it can start (e.g. that tab owns the OPFS store);
+/// the returned future completes once the Worker is ready. There is no init
+/// timeout: init errors and Worker load failures complete it with an error.
 Future<ExternalLibrary> loadExternalLibraryInWorker({
   required String moduleRoot,
   required String workerScriptUrl,
   String wasmBindgenName = 'wasm_bindgen',
+  void Function()? onWaitingForOtherTab,
 }) async {
   final result = await initializeWasmModuleInWorker(
     root: moduleRoot,
     workerScriptUrl: workerScriptUrl,
+    onWaitingForOtherTab: onWaitingForOtherTab,
   );
   return ExternalLibrary(
     debugInfo: 'moduleRoot=$moduleRoot (worker)',

@@ -28,9 +28,6 @@ Future<void> initializeWasmModule({
 /// `frb_worker.js`. Bump this whenever the message protocol changes.
 const _kExpectedProtocolVersion = 1;
 
-/// How long to wait for the Worker to report `ready` before giving up.
-const _kWorkerInitTimeout = Duration(seconds: 30);
-
 /// Result of initializing the WASM module inside a Dedicated Web Worker.
 typedef WorkerInitResult = ({web.Worker worker, int contentHash});
 
@@ -39,6 +36,12 @@ typedef WorkerInitResult = ({web.Worker worker, int contentHash});
 /// This enables APIs that require Worker context:
 /// - OPFS `FileSystemSyncAccessHandle` (for SQLite/sahpool)
 /// - `Atomics.wait` (for Rust mutex/rwlock)
+///
+/// Completes when the Worker reports `ready`, and fails as soon as it reports
+/// an `init` error or fails to load. A Worker that has to wait for something
+/// before it can start (e.g. the OPFS store being open in another tab) may
+/// send `waitingForOtherTab`, which is forwarded to [onWaitingForOtherTab];
+/// the future then completes once the Worker gets going.
 ///
 /// Returns the [web.Worker] together with the Rust content hash reported by
 /// the Worker. The caller is responsible for routing FRB dispatch calls
@@ -51,6 +54,7 @@ typedef WorkerInitResult = ({web.Worker worker, int contentHash});
 Future<WorkerInitResult> initializeWasmModuleInWorker({
   required String root,
   required String workerScriptUrl,
+  void Function()? onWaitingForOtherTab,
 }) async {
   _ensureCrossOriginIsolated();
 
@@ -62,7 +66,22 @@ Future<WorkerInitResult> initializeWasmModuleInWorker({
     final data = event.data;
     if (data == null || readyCompleter.isCompleted) return;
     final obj = data as JSObject;
-    if (_stringProp(obj, 'type') != 'ready') return;
+    switch (_stringProp(obj, 'type')) {
+      case 'waitingForOtherTab':
+        onWaitingForOtherTab?.call();
+        return;
+      case 'error' when _stringProp(obj, 'source') == 'init':
+        readyCompleter.completeError(
+          StateError(
+            'FRB Worker failed to initialize: ${_stringProp(obj, 'message')}',
+          ),
+        );
+        return;
+      case 'ready':
+        break;
+      default:
+        return;
+    }
 
     final version =
         (obj.getProperty('protocolVersion'.toJS) as JSNumber?)?.toDartInt ?? -1;
@@ -82,6 +101,18 @@ Future<WorkerInitResult> initializeWasmModuleInWorker({
 
   worker.addEventListener('message', onMessage);
 
+  // The Worker script itself failed (e.g. 404 or a syntax error).
+  final onError = (web.Event event) {
+    if (readyCompleter.isCompleted) return;
+    final message = event.isA<web.ErrorEvent>()
+        ? (event as web.ErrorEvent).message
+        : 'Worker error';
+    readyCompleter.completeError(
+      StateError('FRB Worker failed to load: $message'),
+    );
+  }.toJS;
+  worker.addEventListener('error', onError);
+
   // Install a persistent error listener that logs Worker-side errors to the
   // browser console (errors would otherwise be silently lost).
   _installWorkerErrorListener(worker);
@@ -96,19 +127,14 @@ Future<WorkerInitResult> initializeWasmModuleInWorker({
 
   final int contentHash;
   try {
-    contentHash = await readyCompleter.future.timeout(
-      _kWorkerInitTimeout,
-      onTimeout: () => throw StateError(
-        'FRB Worker failed to initialize within '
-        '${_kWorkerInitTimeout.inSeconds} seconds',
-      ),
-    );
+    contentHash = await readyCompleter.future;
   } catch (_) {
     // Clean up the half-initialized Worker so it does not leak.
     worker.terminate();
     rethrow;
   } finally {
     worker.removeEventListener('message', onMessage);
+    worker.removeEventListener('error', onError);
   }
 
   // Install a JS Proxy on window.wasm_bindgen that intercepts rust_arc_* calls
